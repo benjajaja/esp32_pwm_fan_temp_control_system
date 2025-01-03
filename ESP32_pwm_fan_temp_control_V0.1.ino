@@ -6,10 +6,25 @@
 // Compilation: Tested with ESP32 Arduino Core version 3.0.7
 //
 // Description:
-// This program controls multiple 12V PWM fans based on temperature readings from multiple DS18B20 sensors.
-// It uses MQTT over Wi-Fi to report sensor data and fan speeds, with automatic reconnection attempts if Wi-Fi or MQTT fails.
-// Fans are controlled by a single PWM pin, and temperature sensors share a common data pin.
+// This project is an open-source system designed to control multiple 12V PWM fans based on temperature readings from DS18B20 sensors.
+// It uses an ESP32 microcontroller and supports MQTT over Wi-Fi to report sensor data and fan speeds. The system ensures continuous
+// operation even when Wi-Fi or MQTT connections fail.
+//
+// WARNING
+// The ESP32 is not 5V tolerant. Ensure that all connected components operate within the ESP32's voltage limits (typically 3.3V)
+// to avoid damage.
+//
+// NOTES
+// The ESP8266 is not suitable for fans requiring high PWM frequencies above 1kHz, as it lacks support for higher PWM rates. 
+// This sketch is not compatible with ESP8266 due to the use of the ESP32-specific LEDC API for PWM control.
+// If DS18B20 show -127°C, they are either not connected to the right pin or a 5kΩ pullup is needed on the pin.
+//
 // ============================================
+
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 // ============================
 // USER CONFIGURATION SECTION
@@ -24,14 +39,11 @@ const char* mqtt_server = "YOUR_MQTT_BROKER_IP"; // Replace with your MQTT broke
 const int mqtt_port = 1883;                      // Default MQTT port
 const char* mqtt_topic = "fan/control";         // MQTT topic to receive commands
 const char* mqtt_status_topic = "fan/status";   // MQTT topic to publish status
+const char* mqtt_client_name = "ESP32Client";   // MQTT client name / host name
 
 // Sensor and Fan Configuration
 const int NUM_SENSORS = 3;    // Number of DS18B20 temperature sensors
 const int NUM_FANS = 3;       // Number of fans
-
-// Instructions:
-// If you have more than 3 sensors or fans, increase the respective variables above.
-// Ensure you define the correct pins for fans and sensors in the Pin Definitions section.
 
 // Temperature Control Parameters
 const float MIN_TEMP = 35.0; // Minimum temperature for lowest fan speed
@@ -57,11 +69,6 @@ const int reconnectAttempts = 3;                // Maximum number of reconnectio
 
 // LEDC PWM Channel
 #define FAN_CHANNEL 0      // PWM channel for all fans
-
-#include <WiFi.h>
-#include <PubSubClient.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -114,14 +121,18 @@ void callback(char* topic, byte* payload, unsigned int length) {
 bool reconnect() {
   if (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
-    if (client.connect("ESP32Client")) {
-      Serial.println("connected");
-      client.subscribe(mqtt_topic);
+
+    // Attempt to connect to the MQTT broker
+    if (client.connect(mqtt_client_name)) {
+      Serial.println("MQTT connected successfully.");
+      client.subscribe(mqtt_topic); // Subscribe to the desired topic
+      Serial.print("Subscribed to topic: ");
+      Serial.println(mqtt_topic);
       return true;
     } else {
-      Serial.print("failed, rc=");
+      Serial.print("MQTT connection failed, rc=");
       Serial.print(client.state());
-      Serial.println(" try again later");
+      Serial.println(". Retrying in the next loop.");
       return false;
     }
   }
