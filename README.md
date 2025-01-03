@@ -10,15 +10,19 @@ This project is an open-source system designed to control multiple 12V PWM fans 
 - **Fail-Safe Operation:** Maintains functionality if Wi-Fi or MQTT connectivity is lost.
 - **Configurable Parameters:** User-configurable temperature thresholds, PWM frequency, and more.
 
+## ESP32 only
+>[!IMPORTANT]
+>This sketch is not compatible with ESP8266 due to the use of the ESP32-specific LEDC API for PWM control. The ESP8266 is not suitable for fans requiring high PWM frequencies above 1kHz, as it lacks support for higher PWM rates.
+
 ## License
 This project is licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)**.
 
 ## Hardware Requirements
 1. **ESP32 Microcontroller**
 2. **DS18B20 Temperature Sensors** (1 or more)
-3. **12V PWM Fans**
-4. **12V Power Supply**
-5. Resistors and jumper wires for connections
+3. **12V PWM Fans** (used Arctic S12038-4K requiring 25kHZ PWM frequency)
+5. **12V Power Supply**
+6. Resistors and jumper wires for connections
 
 ## Software Requirements
 - **Arduino IDE**
@@ -53,7 +57,7 @@ This project is licensed under the **Creative Commons Attribution-NonCommercial-
 - **Temperature Thresholds:** Adjust `MIN_TEMP` and `MAX_TEMP` to suit your cooling needs.
 
 ## Troubleshooting
-1. Ensure the DS18B20 sensors are connected with an appropriate pull-up resistor.
+1. If you get temperature readings of -127°C, ensure the DS18B20 sensors are connected with an appropriate pull-up resistor. The build-in resistor might not be sufficient, add a 5kΩ resistor to pull up the the pin to 3V3.
 2. Verify the MQTT broker details.
 3. Check serial monitor output for debugging information.
 
