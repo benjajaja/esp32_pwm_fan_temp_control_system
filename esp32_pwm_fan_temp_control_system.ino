@@ -30,20 +30,13 @@
 // USER CONFIGURATION SECTION
 // ============================
 
-// Wi-Fi Credentials
-const char* ssid = "YOUR_SSID";        // Replace with your Wi-Fi SSID
-const char* password = "YOUR_PASSWORD"; // Replace with your Wi-Fi password
-
-// MQTT Broker Configuration
-const char* mqtt_server = "YOUR_MQTT_BROKER_IP"; // Replace with your MQTT broker IP address
-const int mqtt_port = 1883;                      // Default MQTT port
-const char* mqtt_topic = "fan/control";         // MQTT topic to receive commands
-const char* mqtt_status_topic = "fan/status";   // MQTT topic to publish status
-const char* mqtt_client_name = "ESP32Client";   // MQTT client name / host name
+const char* mqtt_status_topic = (String(HASS_DEVICE_ID) + "/status").c_str();
+const char* mqtt_control_topic = (String(HASS_DEVICE_ID) + "/control").c_str();
+const char* mqtt_client_name = (String("ESP32Client_") + HASS_DEVICE_ID).c_str();
 
 // Sensor and Fan Configuration
-const int NUM_SENSORS = 3;    // Number of DS18B20 temperature sensors
-const int NUM_FANS = 3;       // Number of fans
+const int NUM_SENSORS = 1;    // Number of DS18B20 temperature sensors
+const int NUM_FANS = 1;       // Number of fans
 
 // Temperature Control Parameters
 const float MIN_TEMP = 35.0; // Minimum temperature for lowest fan speed
@@ -56,16 +49,16 @@ const int MAX_FAN_SPEED = 255; // Maximum fan speed (PWM value, 0-255)
 // PWM Frequency
 const int PWM_FREQUENCY = 25000; // Frequency for the PWM signal in Hz. Adjust this based on fan requirements.
 
-// Timers
-const unsigned long reportInterval = 30000;      // Report MQTT status every 30 seconds
-const unsigned long reconnectInterval = 600000; // Attempt to reconnect Wi-Fi/MQTT every 10 minutes
-const int reconnectAttempts = 3;                // Maximum number of reconnection attempts
+// Timers (milliseconds)
+const unsigned long reportInterval = 60000;
+const unsigned long reconnectInterval = 600000;
+const int reconnectAttempts = 3;
 
 // ============================
 
 // Pin Definitions
 #define FAN_PWM 12         // GPIO12 (D6) - PWM control for all fans
-#define ONE_WIRE_BUS 4     // GPIO4 (D2) - Dallas temperature sensors data pin
+#define ONE_WIRE_BUS 5     // GPIO4 (D2) - Dallas temperature sensors data pin
 
 // LEDC PWM Channel
 #define FAN_CHANNEL 0      // PWM channel for all fans
@@ -83,11 +76,34 @@ unsigned long lastReconnectAttempt = 0; // Timer for reconnect attempts
 void setup_wifi() {
   Serial.println();
   Serial.print("Connecting to ");
-  Serial.println(ssid);
+  Serial.println(WIFI_SSID);
 
   int attempts = 0;
-  WiFi.begin(ssid, password);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
+  while (WiFi.status() != WL_CONNECTED && attempts < reconnectAttempts) {
+    delay(5000);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("Failed to connect to WiFi. Proceeding offline.");
+  }
+
+  client.setBufferSize(512);
+}
+
+void wait_wifi() {
+  Serial.println();
+  Serial.print("Reconnecting to ");
+  Serial.println(WIFI_SSID);
+
+  int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < reconnectAttempts) {
     delay(5000);
     Serial.print(".");
@@ -125,9 +141,10 @@ bool reconnect() {
     // Attempt to connect to the MQTT broker
     if (client.connect(mqtt_client_name)) {
       Serial.println("MQTT connected successfully.");
-      client.subscribe(mqtt_topic); // Subscribe to the desired topic
+      client.subscribe(mqtt_control_topic); // Subscribe to the desired topic
       Serial.print("Subscribed to topic: ");
-      Serial.println(mqtt_topic);
+      Serial.println(mqtt_control_topic);
+      reportSelf();
       return true;
     } else {
       Serial.print("MQTT connection failed, rc=");
@@ -143,14 +160,15 @@ void setup() {
   Serial.begin(115200);
 
   setup_wifi();
-  client.setServer(mqtt_server, mqtt_port);
+  client.setServer(MQTT_SERVER, MQTT_PORT);
   client.setCallback(callback);
 
   // Initialize temperature sensors
   sensors.begin();
 
+  reconnect();
   // Activate internal pullup if supported
-  pinMode(ONE_WIRE_BUS, INPUT_PULLUP);
+  //pinMode(ONE_WIRE_BUS, INPUT_PULLUP);
 
   // Configure PWM pin
   if (!ledcAttachChannel(FAN_PWM, PWM_FREQUENCY, 8, FAN_CHANNEL)) {
@@ -159,15 +177,42 @@ void setup() {
   }
 }
 
+void reportSelf() {
+  String payload =
+  "{"
+  "  \"name\": \"" + String(HASS_DEVICE_NAME) + "\","
+  "  \"state_topic\": \"" + String(mqtt_status_topic) +"\","
+  "  \"unique_id\": \"" + String(HASS_DEVICE_ID) +"\","
+  "  \"unit_of_measurement\": \"°C\","
+  "  \"value_template\": \"{{ value_json.temperature }}\","
+  "  \"device_class\": \"temperature\""
+  "}";
+  String topic = "homeassistant/sensor/" + String(HASS_DEVICE_ID) + "/config";
+  if (client.publish(topic.c_str(), payload.c_str(), true)) {
+    Serial.println("Reported self to " + String("homeassistant/sensor/") + String(HASS_DEVICE_ID) + "/config");
+  } else {
+    Serial.println("MQTT publish failed!");
+  }
+  Serial.println(payload.c_str());
+}
+
 void reportStatus(float maxTemp, int pwmValue) {
+  if (maxTemp > 50.0) {
+    Serial.println("not reporting a temperatue above 50.0");
+    return;
+  }
   String payload = "{";
   payload += "\"temperature\":" + String(maxTemp);
   payload += ", \"pwm\":" + String(pwmValue);
   payload += "}";
   client.publish(mqtt_status_topic, payload.c_str());
+  Serial.println("Published to MQTT.");
 }
 
 void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    wait_wifi();
+  }
   if (WiFi.status() == WL_CONNECTED) {
     if (!client.connected() && millis() - lastReconnectAttempt > reconnectInterval) {
       lastReconnectAttempt = millis();

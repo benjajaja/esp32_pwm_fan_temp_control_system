@@ -20,9 +20,8 @@ This project is licensed under the **Creative Commons Attribution-NonCommercial-
 ## Hardware Requirements
 1. **ESP32 Microcontroller**
 2. **DS18B20 Temperature Sensors** (1 or more)
-3. **12V PWM Fans** (used Arctic S12038-4K requiring 25kHZ PWM frequency)
-5. **12V Power Supply**
-6. Resistors and jumper wires for connections
+  - A ~4.7kΩ resitor may be necessary
+3. **5V PWM Fans** (Noctua 5V models work fine with usb power `VIN` pin)
 
 ## Software Requirements
 - **Arduino IDE**
@@ -32,22 +31,24 @@ This project is licensed under the **Creative Commons Attribution-NonCommercial-
   - `PubSubClient`
   - `OneWire`
   - `DallasTemperature`
+- Python 3
 
 ## Installation and Setup
-1. Clone or download this repository.
-2. Open the provided `.ino` file in the Arduino IDE.
-3. Install the required libraries from the Arduino Library Manager.
-4. Configure the following user variables in the `USER CONFIGURATION SECTION`:
-   - Wi-Fi credentials (`ssid` and `password`)
-   - MQTT broker information (`mqtt_server`, `mqtt_port`, etc.)
-   - Number of sensors and fans (`NUM_SENSORS`, `NUM_FANS`)
-   - Temperature thresholds (`MIN_TEMP`, `MAX_TEMP`)
-   - PWM frequency (`PWM_FREQUENCY`)
-5. Connect the hardware as per the pin definitions in the code.
-6. Upload the code to your ESP32.
+1. Use `arduino-cli` to install required libraries.
+2. Create an `.env.mydevice` file and fill in the sensitive constants:
+  - `WIFI_SSID`
+  - `WIFI_PASSWORD`
+  - `MQTT_SERVER`
+  - `MQTT_PORT`
+  - `HASS_DEVICE_ID`
+  - `HASS_DEVICE_NAME`
+3. Connect the hardware as per the pin definitions in the code, edit the code to match if necessary.
+4. Run `./flash.sh mydevice`
+  - Or edit the file if you don't need/want to attach to serial ttyUSB immediately.
 
 ## How to Use
 - The system will automatically adjust fan speed based on temperature readings.
+- The device reports itself to home-assistant MQTT auto-discovery.
 - Monitor the fan speeds and temperatures via the MQTT broker.
 - If the Wi-Fi connection fails, the system will continue to adjust fans based on sensor readings.
 
@@ -57,12 +58,14 @@ This project is licensed under the **Creative Commons Attribution-NonCommercial-
 - **Temperature Thresholds:** Adjust `MIN_TEMP` and `MAX_TEMP` to suit your cooling needs.
 
 ## Troubleshooting
-1. If you get temperature readings of -127°C, ensure the DS18B20 sensors are connected with an appropriate pull-up resistor. The build-in resistor might not be sufficient, add a 5kΩ resistor to pull up the the pin to 3V3.
+1. If you get temperature readings of -127°C, ensure the DS18B20 sensors are connected with an appropriate pull-up resistor. The build-in resistor might not be sufficient, add a ~4.7kΩ resistor to pull up the the pin to 3V3. Connect it between the 3.3 and the data pin you picked.
 2. Verify the MQTT broker details.
 3. Check serial monitor output for debugging information.
+4. Home-assistant should automatically discover the device.
+5. Some GPIO pins can interfere with the automatic boot/flash mode of the upload, first try removing any connections, and if that works, pick another pin.
 
 ## Author
-Claude Wolter
+Claude Wolter, Benjamin Große
 
 ---
 
