@@ -25,10 +25,12 @@ FLAGS=(
 # Join the flags array into one space-separated string:
 FLAGS_STR="${FLAGS[*]}"
 
-sudo arduino-cli compile --fqbn esp32:esp32:esp32 -v \
+sudo arduino-cli compile \
+  --fqbn esp32:esp32:esp32doit-devkit-v1 \
+  -v \
   --build-property "build.extra_flags=${FLAGS_STR}" \
   .
 
-sudo arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 .
+sudo arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32doit-devkit-v1 .
 sudo arduino-cli monitor -p /dev/ttyUSB0 -c 115200
 

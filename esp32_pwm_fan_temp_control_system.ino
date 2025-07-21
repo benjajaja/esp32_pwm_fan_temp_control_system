@@ -30,9 +30,9 @@
 // USER CONFIGURATION SECTION
 // ============================
 
-const char* mqtt_status_topic = (String(HASS_DEVICE_ID) + "/status").c_str();
-const char* mqtt_control_topic = (String(HASS_DEVICE_ID) + "/control").c_str();
-const char* mqtt_client_name = (String("ESP32Client_") + HASS_DEVICE_ID).c_str();
+static const char mqtt_status_topic[] = HASS_DEVICE_ID "/status";
+static const char mqtt_control_topic[] = HASS_DEVICE_ID "/set";
+static const char mqtt_client_name[] = "ESP32Client_" HASS_DEVICE_ID;
 
 // Sensor and Fan Configuration
 const int NUM_SENSORS = 1;    // Number of DS18B20 temperature sensors
@@ -43,15 +43,18 @@ const float MIN_TEMP = 35.0; // Minimum temperature for lowest fan speed
 const float MAX_TEMP = 55.0; // Maximum temperature for full fan speed
 
 // Fan Speed Control
-const int MIN_FAN_SPEED = 50;  // Minimum fan speed (PWM value, 0-255)
+const int MIN_FAN_SPEED = 96;  // Minimum fan speed (PWM value, 0-255)
 const int MAX_FAN_SPEED = 255; // Maximum fan speed (PWM value, 0-255)
+
+// Temperature thresholds
+const float FAN_ON_TEMP = 25.0;
 
 // PWM Frequency
 const int PWM_FREQUENCY = 25000; // Frequency for the PWM signal in Hz. Adjust this based on fan requirements.
 
 // Timers (milliseconds)
-const unsigned long reportInterval = 60000;
-const unsigned long reconnectInterval = 600000;
+const unsigned long reportInterval = 2000;
+const unsigned long reconnectInterval = 5000;
 const int reconnectAttempts = 3;
 
 // ============================
@@ -62,6 +65,9 @@ const int reconnectAttempts = 3;
 
 // LEDC PWM Channel
 #define FAN_CHANNEL 0      // PWM channel for all fans
+
+const int TACH_PIN = 13;
+const int SAMPLE_TIME = 1000;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -88,8 +94,8 @@ void setup_wifi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected");
-    Serial.println("IP address: ");
+    Serial.print("WiFi connected, ");
+    Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
   } else {
     Serial.println("Failed to connect to WiFi. Proceeding offline.");
@@ -119,24 +125,42 @@ void wait_wifi() {
   }
 }
 
+static int overridePwm = -1.0;
+
 void callback(char* topic, byte* payload, unsigned int length) {
   String message = "";
   for (int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
-  Serial.print("Message received: ");
+  Serial.print("Message received on ");
+  Serial.print(topic);
+  Serial.println(":");
   Serial.println(message);
 
-  int pwmValue = message.toInt();
-  pwmValue = constrain(pwmValue, MIN_FAN_SPEED, MAX_FAN_SPEED);
+  int pwmValue = 0;
+  if (strcmp(message.c_str(), "ON") == 0) {
+    pwmValue = MAX_FAN_SPEED;
+  } else if (strcmp(message.c_str(), "OFF") == 0) {
+    pwmValue = 0;
+  } else {
+    int pwmPct = message.toInt();
+    pwmValue = (pwmPct * MAX_FAN_SPEED) / 100;
+  }
+  pwmValue = constrain(pwmValue, 0.0, MAX_FAN_SPEED);
 
+  overridePwm = pwmValue;
   // Apply PWM value to all fans
-  ledcWrite(FAN_CHANNEL, pwmValue);
+  Serial.print("Set fan to ");
+  Serial.println(pwmValue);
+  // ledcWrite(FAN_CHANNEL, pwmValue);
+  analogWrite(FAN_PWM, pwmValue);
 }
 
 bool reconnect() {
   if (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
+    Serial.print("Attempting MQTT connection as ");
+    Serial.print(mqtt_client_name);
+    Serial.println("...");
 
     // Attempt to connect to the MQTT broker
     if (client.connect(mqtt_client_name)) {
@@ -144,7 +168,10 @@ bool reconnect() {
       client.subscribe(mqtt_control_topic); // Subscribe to the desired topic
       Serial.print("Subscribed to topic: ");
       Serial.println(mqtt_control_topic);
-      reportSelf();
+      registerSensor("temperature", "°C");
+      registerSensor("pwm", "%");
+      registerSensor("rpm", "rpm");
+      registerNumber();
       return true;
     } else {
       Serial.print("MQTT connection failed, rc=");
@@ -171,42 +198,149 @@ void setup() {
   //pinMode(ONE_WIRE_BUS, INPUT_PULLUP);
 
   // Configure PWM pin
-  if (!ledcAttachChannel(FAN_PWM, PWM_FREQUENCY, 8, FAN_CHANNEL)) {
-    Serial.println("Failed to configure PWM channel");
-    while (true); // Halt if configuration fails
-  }
+  // ledcSetup(FAN_CHANNEL, PWM_FREQUENCY, 8);
+  // ledcAttachPin(FAN_PWM, FAN_CHANNEL);
+  // if (!ledcAttachChannel(FAN_PWM, PWM_FREQUENCY, 8, FAN_CHANNEL)) {
+    // Serial.println("Failed to configure PWM channel");
+    // while (true); // Halt if configuration fails
+  // }
+  pinMode(FAN_PWM, OUTPUT);
+  pinMode(TACH_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(TACH_PIN), countPulse, FALLING);
 }
 
-void reportSelf() {
-  String payload =
-  "{"
-  "  \"name\": \"" + String(HASS_DEVICE_NAME) + "\","
-  "  \"state_topic\": \"" + String(mqtt_status_topic) +"\","
-  "  \"unique_id\": \"" + String(HASS_DEVICE_ID) +"\","
-  "  \"unit_of_measurement\": \"°C\","
-  "  \"value_template\": \"{{ value_json.temperature }}\","
-  "  \"device_class\": \"temperature\""
-  "}";
-  String topic = "homeassistant/sensor/" + String(HASS_DEVICE_ID) + "/config";
-  if (client.publish(topic.c_str(), payload.c_str(), true)) {
-    Serial.println("Reported self to " + String("homeassistant/sensor/") + String(HASS_DEVICE_ID) + "/config");
+volatile unsigned int pulseCount = 0;
+unsigned long lastTime = 0;
+float rpm = 0;
+void countPulse() {
+  pulseCount++;
+}
+
+void measureRPM() {
+  // Reset pulse counter
+  pulseCount = 0;
+  lastTime = millis();
+  
+  // Wait for sample period
+  delay(SAMPLE_TIME);
+  
+  // Calculate RPM
+  // Most fans generate 2 pulses per revolution
+  // RPM = (pulses / 2) * (60000 / sample_time_ms)
+  rpm = (pulseCount / 2.0) * (60000.0 / SAMPLE_TIME);
+}
+
+void registerSensor(char* value, char* unit_of_measurement) {
+  char topic[128];
+  char payload[512];
+  
+  // Build topic string
+  char entity[64];
+  strcpy(
+      entity, 
+      strcmp(value, "temperature") == 0 || strcmp(value, "rpm") == 0 
+        ? "sensor" 
+        : "fan"
+  );
+  snprintf(topic, sizeof(topic), "homeassistant/%s/%s_%s/config", entity, HASS_DEVICE_ID, value);
+  
+  // Build payload - common part
+  int pos = snprintf(payload, sizeof(payload),
+    "{"
+    "\"name\":\"%s %s\","
+    "\"state_topic\":\"%s\","
+    "\"unique_id\":\"%s_%s\","
+    "\"unit_of_measurement\":\"%s\","
+    "\"value_template\":\"{{ value_json.%s }}\"",
+    HASS_DEVICE_NAME, value, 
+    mqtt_status_topic, 
+    HASS_DEVICE_ID,
+    value,
+    unit_of_measurement,
+    value);
+  
+  // Add conditional part
+  if (strcmp(value, "temperature") == 0) {
+    pos += snprintf(payload + pos, sizeof(payload) - pos,
+      ",\"device_class\":\"%s\","
+      "\"device\":{"
+      "\"identifiers\":[\"%s\"],"
+      "\"name\":\"%s\","
+      "\"model\":\"ESP32 Sensor\","
+      "\"manufacturer\":\"Benja\""
+      "}}", value, HASS_DEVICE_ID, HASS_DEVICE_NAME);
+  } else {
+    pos += snprintf(payload + pos, sizeof(payload) - pos,
+      "\"device\":{"
+      "\"identifiers\":[\"%s\"]"
+      "}}", HASS_DEVICE_ID);
+  }
+  
+  if (client.publish(topic, payload, true)) {
+    Serial.print("Reported self to ");
+    Serial.println(topic);
+    Serial.println(payload);
   } else {
     Serial.println("MQTT publish failed!");
   }
-  Serial.println(payload.c_str());
 }
 
-void reportStatus(float maxTemp, int pwmValue) {
-  if (maxTemp > 50.0) {
-    Serial.println("not reporting a temperatue above 50.0");
+void registerNumber() {
+  char topic[128];
+  char payload[512];
+  
+  // Build topic string
+  snprintf(topic, sizeof(topic), "homeassistant/number/%s_pwm/config", HASS_DEVICE_ID);
+  
+  // Build payload - common part
+  snprintf(payload, sizeof(payload),
+    "{"
+    "\"name\":\"%s pwm control\","
+    "\"command_topic\":\"%s\","
+    "\"unique_id\":\"%s_pwm_control\","
+    "\"device\":{"
+    "\"identifiers\":[\"%s\"]"
+    "}}", 
+    HASS_DEVICE_NAME,
+    mqtt_control_topic, 
+    HASS_DEVICE_ID,
+    HASS_DEVICE_ID);
+  
+  if (client.publish(topic, payload, true)) {
+    Serial.print("Reported self to ");
+    Serial.println(topic);
+    Serial.println(payload);
+  } else {
+    Serial.println("MQTT publish failed!");
+  }
+}
+
+void reportStatus(float maxTemp, int pwmValue, int rpmValue) {
+  if (maxTemp > 50.0 || maxTemp < 0.0) {
+    Serial.println("Not reporting a temperatue above 50.0 or below 0.0");
     return;
   }
-  String payload = "{";
-  payload += "\"temperature\":" + String(maxTemp);
-  payload += ", \"pwm\":" + String(pwmValue);
-  payload += "}";
-  client.publish(mqtt_status_topic, payload.c_str());
-  Serial.println("Published to MQTT.");
+  
+  char payload[64];  // Small buffer for simple JSON
+  
+  // Build JSON payload with proper float formatting
+  int pwmPct = pwmValue * 100 / MAX_FAN_SPEED;
+  snprintf(
+      payload,
+      sizeof(payload),
+      "{\"temperature\":%.1f,\"pwm\":%d,\"rpm\":%d}",
+      maxTemp,
+      pwmPct,
+      rpmValue
+  );
+  
+  if (client.publish(mqtt_status_topic, payload)) {
+    Serial.print(mqtt_status_topic);
+    Serial.print(" ");
+    Serial.println(payload);
+  } else {
+    Serial.println("Failed to publish to MQTT.");
+  }
 }
 
 void loop() {
@@ -223,27 +357,49 @@ void loop() {
 
   // Read temperatures and control fans regardless of Wi-Fi connection
   sensors.requestTemperatures();
-  float maxTemp = -127.0;
+  float temp = -127.0;
   for (int i = 0; i < NUM_SENSORS; i++) {
-    float temp = sensors.getTempCByIndex(i);
-    if (temp > maxTemp) {
-      maxTemp = temp;
+    float ctemp = sensors.getTempCByIndex(i);
+    if (ctemp > temp) {
+      temp = ctemp;
     }
   }
 
-  int pwmValue = (maxTemp <= MIN_TEMP) ? MIN_FAN_SPEED : (maxTemp >= MAX_TEMP) ? MAX_FAN_SPEED : map(maxTemp, MIN_TEMP, MAX_TEMP, MIN_FAN_SPEED, MAX_FAN_SPEED);
-  ledcWrite(FAN_CHANNEL, pwmValue);
+  static bool fanRunning = false;
+  if (temp >= FAN_ON_TEMP) {
+    fanRunning = true;
+  } else if (temp <= FAN_ON_TEMP - 2.0) {
+    fanRunning = false;
+  }
+  int pwmValue = 0;
+  if (fanRunning) {
+    // Map temperature to PWM range (30°C = min speed, higher = faster)
+    // Adjust the upper temperature limit as needed
+    pwmValue = map(constrain(temp * 100, 3000, 5000), 
+                   3000, 5000,           // 30.0°C to 50.0°C 
+                   MIN_FAN_SPEED, MAX_FAN_SPEED);
+  } else {
+    pwmValue = 0;  // Fan completely off
+  }
+  if (overridePwm != -1.0) {
+    pwmValue = overridePwm;
+  }
+  // ledcWrite(FAN_CHANNEL, pwmValue);
+  analogWrite(FAN_PWM, pwmValue);
 
   if (WiFi.status() == WL_CONNECTED && millis() - lastReportTime > reportInterval) {
     lastReportTime = millis();
-    reportStatus(maxTemp, pwmValue);
+    reportStatus(temp, pwmValue, rpm);
   }
 
   // Always print temperature and PWM for debugging
-  Serial.print("Max Temp: ");
-  Serial.print(maxTemp);
+  Serial.print("(loop) Temp: ");
+  Serial.print(temp);
   Serial.print(" °C, PWM: ");
   Serial.println(pwmValue);
 
-  delay(1000);
+  Serial.print("RPM: ");
+  Serial.println(rpm);
+
+  measureRPM();
 }
